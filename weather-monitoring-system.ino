@@ -13,6 +13,9 @@ RtcDS1302<ThreeWire> rtc(myWire);
 
 File file;
 
+// GSM
+HardwareSerial &gsmSerial = Serial3;
+
 // push button pin
 const byte togglePlantButton = 2;
 
@@ -42,6 +45,7 @@ const unsigned int sensorReadTimeout = 2000;
 unsigned long lastSensorRead = 0;
 
 // toggle plant button
+unsigned int pressDuration = 3000;
 unsigned long lastButtonPress = 0;
 bool hasBeenPressed = false;
 
@@ -52,9 +56,14 @@ struct Plant {
   int humidityThreshold;
 } plant1, plant2;
 
-// temporary delete later
-const byte ledPin = 4;
-byte ledState = LOW;
+// gsm
+const byte numOfChars = 64;
+char gsmResponse[numOfChars];
+bool isGsmResponseReady = false;
+bool isDoneCheckingStatus = false;
+bool isCheckingNetworkStatus = false;
+const unsigned int gsmTimeout = 1000;
+unsigned long lastStatusCheck = 0;
 
 // icons
 byte temperatureIcon[] = {
@@ -108,19 +117,24 @@ byte rainIcon[] = {
   B01010
 };
 
-
 // common
 unsigned long timeElapsed = 0;
 
+// temporary delete later
+const byte ledPin = 4;
+byte ledState = LOW;
+
 void setup() {
   Serial.begin(9600);
-  pinMode(ledPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);  // temporary remove later
+  
   initScreen();
   initDhtSensor();
   initRtc();
   initSd();
   initPlantThreshold();
   initTogglePlantButton();
+  initializeGsm();
   systemIsReady();
 }
 
@@ -185,15 +199,43 @@ void initSd() {
 
   delay(initScreenTimeout);
 }
-void initPlantThreshold() {  
+void initPlantThreshold() {
   plant1.temperatureThreshold = 38;
   plant1.humidityThreshold = 90;
-  
+
   plant2.temperatureThreshold = 39;
   plant2.humidityThreshold = 91;
 }
 void initTogglePlantButton() {
   pinMode(togglePlantButton, INPUT_PULLUP);
+}
+void initializeGsm() {
+  gsmSerial.begin(9600);
+  
+  Serial.println(F("Connecting to cellular network"));
+
+  screen.clear();
+  screen.setCursor(1, 0);
+  screen.print("Connecting to");
+  screen.setCursor(0, 1);
+  screen.print("cellular network");
+
+  while (!isDoneCheckingStatus) {
+    if (millis() - lastStatusCheck >= gsmTimeout) {
+      lastStatusCheck = millis();
+      if (!isCheckingNetworkStatus) {
+        gsmSerial.print("AT+CREG?\r\n");
+        isCheckingNetworkStatus = true;
+      } else {
+        isCheckingNetworkStatus = false;
+      }
+    }
+
+    readGsmResponse(3);
+    getNetworkStatus();
+  }
+
+  delay(initScreenTimeout);
 }
 void systemIsReady() {
   screen.clear();
@@ -233,6 +275,42 @@ void logData() {
 
     file.close();
   }
+}
+
+void getNetworkStatus() {
+  if (!isGsmResponseReady) {
+    return;
+  }
+
+  char *response;
+  char *mode;
+  char *networkStatus;
+
+  response = strstr(gsmResponse, "+CREG: ");
+  mode = strtok(response, ",");
+  Serial.print(F("GSM response >> "));
+  Serial.println(response);
+  if (mode != NULL) {
+    networkStatus = strtok(NULL, ",");
+    if (networkStatus != NULL) {
+      if (*networkStatus == '1') {
+        isDoneCheckingStatus = true;
+        lastStatusCheck = 0;
+
+        Serial.println(F("Successfully connected to network!"));
+
+        screen.clear();
+        screen.setCursor(2, 0);
+        screen.print("Connected to");
+        screen.setCursor(4, 1);
+        screen.print("network!");
+        
+        return;
+      }
+    }
+  }
+
+  isGsmResponseReady = false;
 }
 
 void getSensorData() {
@@ -326,31 +404,32 @@ void displayRainThreshold() {
   screen.print("N");
 }
 
+
 void readTogglePlantButtonState() {
   byte buttonState = !digitalRead(togglePlantButton);
-  
+
   if (buttonState == HIGH && !hasBeenPressed) {
     lastButtonPress = timeElapsed;
     hasBeenPressed = true;
     return;
   }
 
-  if (timeElapsed - lastButtonPress < 5000 && buttonState == LOW) {
+  if (timeElapsed - lastButtonPress < pressDuration && buttonState == LOW) {
     lastButtonPress = 0;
     hasBeenPressed = false;
     return;
   }
 
-  if (timeElapsed - lastButtonPress >= 5000 && buttonState == HIGH)  {
-     ledState = !ledState;
- 
-     toggleCurrentPlant();
-     toggleLogFile();
-     digitalWrite(ledPin, ledState);
- 
-     lastButtonPress = 0;
-     hasBeenPressed = false;
-     return;
+  if (timeElapsed - lastButtonPress >= pressDuration && buttonState == HIGH)  {
+    ledState = !ledState;
+
+    toggleCurrentPlant();
+    toggleLogFile();
+    digitalWrite(ledPin, ledState);
+
+    lastButtonPress = 0;
+    hasBeenPressed = false;
+    return;
   }
 
 }
@@ -358,7 +437,7 @@ void toggleCurrentPlant() {
   currentPlant = currentPlant == 1 ? 2 : 1;
 }
 void toggleLogFile() {
-  currentFilename = currentPlant == 1 ? plant1Filename: plant2Filename;
+  currentFilename = currentPlant == 1 ? plant1Filename : plant2Filename;
 }
 void prepareTextFiles() {
   if (!SD.exists(plant1Filename)) {
@@ -378,5 +457,42 @@ void setFileHeadings(char *filename) {
     file.print("Time \t");
     file.println("Date \t");
     file.close();
+  }
+}
+void readGsmResponse(byte maxLineCount) {
+  static byte index = 0;
+  static byte lineCount = 0;
+  char endMarker = '\n';
+  char rc;
+
+  while (gsmSerial.available() > 0 && !isGsmResponseReady) {
+    rc = gsmSerial.read();
+
+    // receive char while not end marker
+    if (rc != endMarker) {
+      gsmResponse[index] = rc;
+      index++;
+
+      // buffer overrun guard
+      if (index >= numOfChars) {
+        index = numOfChars - 1;
+      }
+      return;
+    }
+
+    // if end marker
+    // check line count
+    if (lineCount < maxLineCount) {
+      gsmResponse[index] = ' ';
+      index++;
+      lineCount++;
+
+      // response is ready
+    } else {
+      gsmResponse[index] = NULL;
+      index = 0;
+      lineCount = 0;
+      isGsmResponseReady = true;
+    }
   }
 }
