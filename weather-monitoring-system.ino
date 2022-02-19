@@ -53,11 +53,32 @@ bool hasBeenPressed = false;
 byte currentPlant = 1;
 struct Plant {
   int temperatureThreshold;
-  int humidityThreshold;
+  int rainThreshold;
 } plant1, plant2;
 
+
+// sms
+byte sentMessageCount = 0;
+byte maxSentMessageCount = 1;
+byte sampleCount = 0;
+byte maxSampleCount = 3;
+bool hasBeenSetToTextMode = false;
+bool isSendingNotification = false;
+bool hasStartedSendingSms = false;
+bool ownerHaveBeenNotified = false;
+bool isReadingMessage = true;
+unsigned long startedAt = 0;
+unsigned long startedGettingMessageAt = 0;
+const unsigned int smsTimeout = 1000;
+const unsigned int commandTimeout = 1000;
+char ownerNumber[16] = "+639547624887";
+char inboxMessage[128];
+char message[64];
+char prevCommand[8];
+char currentCommand[8];
+
 // gsm
-const byte numOfChars = 64;
+const byte numOfChars = 128;
 char gsmResponse[numOfChars];
 bool isGsmResponseReady = false;
 bool isDoneCheckingStatus = false;
@@ -132,20 +153,22 @@ void setup() {
   initDhtSensor();
   initRtc();
   initSd();
-  initPlantThreshold();
+  initPlantThresholds();
   initTogglePlantButton();
   initializeGsm();
   systemIsReady();
 }
 
 void loop() {
-  Serial.begin(9600);
   timeElapsed = millis();
   readTogglePlantButtonState();
   getSensorData();
   logData();
   displayTime();
   displayData();
+  sendNotification();
+  getMessage();
+  parseMessage();
 }
 
 // Initializations
@@ -199,12 +222,14 @@ void initSd() {
 
   delay(initScreenTimeout);
 }
-void initPlantThreshold() {
-  plant1.temperatureThreshold = 38;
-  plant1.humidityThreshold = 90;
+void initPlantThresholds() {
+//  plant1.temperatureThreshold = 38;
+  plant1.temperatureThreshold = 31;
+  plant1.rainThreshold = 0;
 
-  plant2.temperatureThreshold = 39;
-  plant2.humidityThreshold = 91;
+//  plant2.temperatureThreshold = 39;
+  plant2.temperatureThreshold = 31;
+  plant2.rainThreshold = 0;
 }
 void initTogglePlantButton() {
   pinMode(togglePlantButton, INPUT_PULLUP);
@@ -319,6 +344,8 @@ void getSensorData() {
 
     getCurrentTemperature();
     getCurrentHumidity();
+
+    checkTemperature();
   }
 }
 void getCurrentTemperature() {
@@ -332,6 +359,112 @@ void getCurrentHumidity() {
   if (!isnan(dhtHumidity)) {
     humidity = dhtHumidity;
   }
+}
+
+void checkTemperature() {
+  int threshold;
+  if (currentPlant == 1) {
+    threshold = plant1.temperatureThreshold;
+  } else {
+    threshold = plant2.temperatureThreshold;
+  }
+  
+  if (temperature < threshold && sampleCount > 0) {
+    if (ownerHaveBeenNotified) {
+      ownerHaveBeenNotified = false;
+    }
+    sampleCount = 0;
+    return;
+  }
+
+  if (sampleCount >= maxSampleCount && !ownerHaveBeenNotified) {
+    isSendingNotification = true;
+    sprintf(message, "The plant is on fire!");
+    sampleCount = 0;
+    return;
+  }
+  
+  sampleCount++;
+}
+void sendNotification() {
+  if (!isSendingNotification) {
+    return;
+  }
+  
+  if (sendSms()) {
+    if (sentMessageCount >= maxSentMessageCount) {
+      isSendingNotification = false;
+      ownerHaveBeenNotified = true;
+      message[0] = NULL;
+      sentMessageCount = 0;
+      return;
+    }
+
+    sentMessageCount++;
+  }
+}
+
+void getMessage() {
+  if (isSendingNotification) {
+    return;
+  }
+
+  if (!isReadingMessage) {
+    return;
+  }
+
+  // send command to gsm
+  if (timeElapsed - startedGettingMessageAt >= commandTimeout) {
+    startedGettingMessageAt = timeElapsed;
+    // set to text mode
+    if (!hasBeenSetToTextMode) {
+      Serial.println(F("Setting to text mode ..."));
+      gsmSerial.println("AT+CMGF=1");
+      hasBeenSetToTextMode = true;
+    } else {
+      Serial.println(F("Reading first message if any"));
+      hasBeenSetToTextMode = false;
+      gsmSerial.println("AT+CMGR=1");
+    }
+  }
+
+  readGsmResponse(9);
+
+  if (isGsmResponseReady) {
+    char *message = strstr(gsmResponse, "+CMGR: \"REC READ\"");
+
+    if (message != NULL) {
+      strcpy(inboxMessage, gsmResponse);
+      Serial.print(F("Message: "));
+      Serial.println(inboxMessage);
+      
+      isReadingMessage = false;
+      // immediately delete message
+      gsmSerial.print("AT+CMGD=1,4\r\n");
+    }
+
+    isGsmResponseReady = false;
+    gsmResponse[0] = NULL;
+  }
+}
+void parseMessage() {
+  if (isReadingMessage) {
+     return;
+  }
+  
+  if (strlen(inboxMessage) == 0) {
+    return;
+  }
+  
+  if (strstr(inboxMessage, ownerNumber) != NULL) {
+    if (strstr(inboxMessage, "GET") != NULL) {
+      isSendingNotification = true;
+      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Rain: N \n Current plant: %i", humidity, temperature, currentPlant);
+    }
+  }
+
+  inboxMessage[0] = NULL;
+  isReadingMessage = true;
 }
 
 void displayData() {
@@ -404,7 +537,48 @@ void displayRainThreshold() {
   screen.print("N");
 }
 
+bool sendSms() {
+  if (!hasStartedSendingSms) {
+    strcpy(currentCommand, "txtMode");
+    strcpy(prevCommand, "txtMode");
 
+    gsmSerial.println("AT+CMGF=1");
+    Serial.println(F("Sending SMS..."));
+    Serial.println(F("AT+CMGF=1"));
+    startedAt = timeElapsed;
+    hasStartedSendingSms = true;
+  }
+
+  if (timeElapsed - startedAt >= smsTimeout && hasStartedSendingSms) {
+    startedAt = timeElapsed;
+    if (!strcmp(prevCommand, "txtMode")) {
+      strcpy(currentCommand, "contact");
+      Serial.println(F("Setting contact"));
+      gsmSerial.println("AT+CMGS=\"+639682610713\"");
+    }
+    if (!strcmp(currentCommand, "contact") && strcmp(prevCommand, "txtMode")) {
+      Serial.print(F("Setting message: "));
+      Serial.println(message);
+      
+      strcpy(currentCommand, "message");
+      gsmSerial.println(message);
+    }
+    if (!strcmp(currentCommand, "message") && strcmp(prevCommand, "contact")) {
+      strcpy(currentCommand, "end");
+      Serial.print(F("End"));
+      gsmSerial.println((char)26);
+    }
+    if (!strcmp(currentCommand, "end") && strcmp(prevCommand, "message")) {
+      currentCommand[0] = NULL;
+      hasStartedSendingSms = false;
+      return true;
+    }
+
+    strcpy(prevCommand, currentCommand);
+  }
+
+  return false;
+}
 void readTogglePlantButtonState() {
   byte buttonState = !digitalRead(togglePlantButton);
 
