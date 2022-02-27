@@ -19,11 +19,13 @@ HardwareSerial &gsmSerial = Serial3;
 // push button pin
 const byte togglePlantButton = 2;
 
+// rain gauge
+const byte rainGaugePin = 18;
+
 // lcd/screen
 const unsigned int initScreenTimeout = 2000;
 const unsigned int screenTimeout = 2000;
 unsigned long lastScreenRefresh = 0;
-
 
 // dht
 int temperature = 0;
@@ -48,6 +50,11 @@ unsigned long lastSensorRead = 0;
 unsigned int pressDuration = 3000;
 unsigned long lastButtonPress = 0;
 bool hasBeenPressed = false;
+
+// rain gauge
+volatile unsigned int tipCount = 0;
+const unsigned int debounceTime = 100;
+unsigned long lastTippedTime = 0;
 
 // plant
 byte currentPlant = 1;
@@ -148,20 +155,23 @@ byte ledState = LOW;
 void setup() {
   Serial.begin(9600);
   pinMode(ledPin, OUTPUT);  // temporary remove later
-  
+
   initScreen();
+  initRainGauge();
   initDhtSensor();
   initRtc();
   initSd();
   initPlantThresholds();
   initTogglePlantButton();
-  initializeGsm();
+//  initializeGsm();
   systemIsReady();
 }
 
 void loop() {
   timeElapsed = millis();
   readTogglePlantButtonState();
+
+  getRainGaugeData();
   getSensorData();
   logData();
   displayTime();
@@ -180,6 +190,10 @@ void initScreen() {
   screen.createChar(2, clockIcon);
   screen.createChar(3, plantIcon);
   screen.createChar(4, rainIcon);
+}
+void initRainGauge() {
+  pinMode(rainGaugePin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(rainGaugePin), tipCounter, FALLING);
 }
 void initDhtSensor() {
   screen.setCursor(2, 0);
@@ -338,6 +352,9 @@ void getNetworkStatus() {
   isGsmResponseReady = false;
 }
 
+void getRainGaugeData() {
+  Serial.println(tipCount);
+}
 void getSensorData() {
   if (timeElapsed - lastSensorRead >= sensorReadTimeout) {
     lastSensorRead = timeElapsed;
@@ -537,6 +554,14 @@ void displayRainThreshold() {
   screen.print("N");
 }
 
+void tipCounter() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastTippedTime >= debounceTime) {
+    tipCount = tipCount + 1;
+  }
+
+  lastTippedTime = currentMillis;
+}
 bool sendSms() {
   if (!hasStartedSendingSms) {
     strcpy(currentCommand, "txtMode");
