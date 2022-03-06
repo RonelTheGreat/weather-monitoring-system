@@ -36,9 +36,7 @@ unsigned long lastClockRefresh = 0;
 const unsigned int clockInterval = 1000;
 
 // SD
-const char *plant1Filename = "plant1.txt";
-const char *plant2Filename = "plant2.txt";
-char *currentFilename = plant1Filename;
+const char *rainFilename = "rain.txt";
 unsigned long lastLogTime = 0;
 const unsigned int logInteval = 180000; // 3 minutes
 
@@ -53,15 +51,24 @@ bool hasBeenPressed = false;
 
 // rain gauge
 volatile unsigned int tipCount = 0;
+bool hasTipped = false;
+bool skipCountAfterInit = true;
+const float oneTip = 0.013;  // 0.012884753042233359696 inch
+const unsigned int resetTimeout = 30000; // 30 seconds just for simulation
 const unsigned int debounceTime = 100;
 unsigned long lastTippedTime = 0;
 
 // plant
-byte currentPlant = 1;
+byte currentPlantSelected = 1;
 struct Plant {
-  int temperatureThreshold;
-  int rainThreshold;
-} plant1, plant2;
+  char name[16];
+  char nameInPlural[16];
+  char filename[16];
+  int temperatureThresholdUpper;
+  int temperatureThresholdLower;
+  float rainThreshold;
+  byte maxTipCount;
+} plant1, plant2, currentPlant;
 
 
 // sms
@@ -72,7 +79,8 @@ byte maxSampleCount = 3;
 bool hasBeenSetToTextMode = false;
 bool isSendingNotification = false;
 bool hasStartedSendingSms = false;
-bool ownerHaveBeenNotified = false;
+bool hasBeenNotifiedRain = false;
+bool hasBeenNotifiedTemparature = false;
 bool isReadingMessage = true;
 unsigned long startedAt = 0;
 unsigned long startedGettingMessageAt = 0;
@@ -81,6 +89,7 @@ const unsigned int commandTimeout = 1000;
 char ownerNumber[16] = "+639547624887";
 char inboxMessage[128];
 char message[64];
+char messageOrigin[16];
 char prevCommand[8];
 char currentCommand[8];
 
@@ -148,37 +157,37 @@ byte rainIcon[] = {
 // common
 unsigned long timeElapsed = 0;
 
-// temporary delete later
-const byte ledPin = 4;
-byte ledState = LOW;
-
 void setup() {
   Serial.begin(9600);
-  pinMode(ledPin, OUTPUT);  // temporary remove later
 
   initScreen();
   initRainGauge();
   initDhtSensor();
+  initTogglePlantButton();
+  initPlantData();
   initRtc();
   initSd();
-  initPlantThresholds();
-  initTogglePlantButton();
-//  initializeGsm();
+  initializeGsm();
   systemIsReady();
 }
 
 void loop() {
   timeElapsed = millis();
-  readTogglePlantButtonState();
-
+  
   getRainGaugeData();
   getSensorData();
+  readTogglePlantButtonState();
   logData();
+  
   displayTime();
   displayData();
+  
   sendNotification();
+  
   getMessage();
   parseMessage();
+
+  resetRainGaugeData();
 }
 
 // Initializations
@@ -236,14 +245,31 @@ void initSd() {
 
   delay(initScreenTimeout);
 }
-void initPlantThresholds() {
-//  plant1.temperatureThreshold = 38;
-  plant1.temperatureThreshold = 31;
-  plant1.rainThreshold = 0;
+void initPlantData() {
+  strcpy(plant1.name, "tomato");
+  strcpy(plant1.nameInPlural, "tomatoes");
+  strcpy(plant1.filename, "plant1.txt");
+  plant1.temperatureThresholdLower = 18;
+  plant1.temperatureThresholdUpper = 32;
+  // 0.2857142857142857/day or 2 inches/week
+  plant1.rainThreshold = 0.286;
+  // 22 tips max per day
+  // plant1.maxTipCount = 22;
+  plant1.maxTipCount = 3;
 
-//  plant2.temperatureThreshold = 39;
-  plant2.temperatureThreshold = 31;
-  plant2.rainThreshold = 0;
+  strcpy(plant2.name, "eggplant");
+  strcpy(plant2.nameInPlural, "eggplants");
+  strcpy(plant2.filename, "plant2.txt");
+  // 21 to 32 degree celsius
+  plant2.temperatureThresholdLower = 21;
+  plant2.temperatureThresholdUpper = 32;
+  // 0.1428571428571429/day or 1 inch/week
+  plant2.rainThreshold = 0.143;
+  // 11 tips max per day
+  // plant2.maxTipCount = 11;
+  plant2.maxTipCount = 4;
+
+  setCurrentPlantData();
 }
 void initTogglePlantButton() {
   pinMode(togglePlantButton, INPUT_PULLUP);
@@ -287,18 +313,14 @@ void systemIsReady() {
 void logData() {
   if (timeElapsed - lastLogTime >= logInteval) {
     lastLogTime = timeElapsed;
-
+    
     RtcDateTime current = rtc.GetDateTime();
-
-    file = SD.open(currentFilename, FILE_WRITE);
+    file = SD.open(currentPlant.filename, FILE_WRITE);
 
     file.print(temperature);
     file.print("\t");
 
     file.print(humidity);
-    file.print("\t");
-
-    file.print(0);
     file.print("\t");
 
     file.print(current.Hour());
@@ -353,7 +375,45 @@ void getNetworkStatus() {
 }
 
 void getRainGaugeData() {
-  Serial.println(tipCount);
+  if (!hasTipped) {
+    return;
+  }
+  
+  // skip first count right after initialization
+  if (skipCountAfterInit) {
+    tipCount = 0;
+    hasTipped = false;
+    skipCountAfterInit = false;
+    return;
+  }
+
+  hasTipped = false;
+  logRainData();
+  
+  if (tipCount >= currentPlant.maxTipCount && !hasBeenNotifiedRain && !isSendingNotification) {
+    isSendingNotification = true;
+    strcpy(messageOrigin, "rain");
+    sprintf(message, "It's raining too much. Move your %s to a dry place!", currentPlant.nameInPlural);
+  }
+}
+void logRainData() {
+  RtcDateTime current = rtc.GetDateTime();
+  file = SD.open(rainFilename, FILE_WRITE);
+
+  file.print(current.Hour());
+  file.print(":");
+  file.print(current.Minute());
+  file.print(":");
+  file.print(current.Second());
+  file.print("\t");
+
+  file.print(current.Month());
+  file.print("/");
+  file.print(current.Day());
+  file.print("/");
+  file.println(current.Year());
+
+  file.close();
 }
 void getSensorData() {
   if (timeElapsed - lastSensorRead >= sensorReadTimeout) {
@@ -377,26 +437,22 @@ void getCurrentHumidity() {
     humidity = dhtHumidity;
   }
 }
-
 void checkTemperature() {
-  int threshold;
-  if (currentPlant == 1) {
-    threshold = plant1.temperatureThreshold;
-  } else {
-    threshold = plant2.temperatureThreshold;
-  }
+  int upperLimit = currentPlant.temperatureThresholdUpper;
+  int lowerLimit = currentPlant.temperatureThresholdLower;
   
-  if (temperature < threshold && sampleCount > 0) {
-    if (ownerHaveBeenNotified) {
-      ownerHaveBeenNotified = false;
+  if (temperature <= upperLimit && temperature >= lowerLimit && sampleCount > 0) {
+    if (hasBeenNotifiedTemparature) {
+      hasBeenNotifiedTemparature = false;
     }
     sampleCount = 0;
     return;
   }
 
-  if (sampleCount >= maxSampleCount && !ownerHaveBeenNotified) {
+  if (sampleCount >= maxSampleCount && !hasBeenNotifiedTemparature && !isSendingNotification) {
     isSendingNotification = true;
-    sprintf(message, "The plant is on fire!");
+    strcpy(messageOrigin, "temperature");
+    sprintf(message, "Current temperature is not good for your %s !", currentPlant.nameInPlural);
     sampleCount = 0;
     return;
   }
@@ -410,8 +466,13 @@ void sendNotification() {
   
   if (sendSms()) {
     if (sentMessageCount >= maxSentMessageCount) {
-      isSendingNotification = false;
-      ownerHaveBeenNotified = true;
+      if (!strcmp(messageOrigin, "rain")) {
+        hasBeenNotifiedRain = true;
+      } else {
+        hasBeenNotifiedTemparature = true;  
+      }
+      
+      isSendingNotification = false;      
       message[0] = NULL;
       sentMessageCount = 0;
       return;
@@ -435,11 +496,9 @@ void getMessage() {
     startedGettingMessageAt = timeElapsed;
     // set to text mode
     if (!hasBeenSetToTextMode) {
-      Serial.println(F("Setting to text mode ..."));
       gsmSerial.println("AT+CMGF=1");
       hasBeenSetToTextMode = true;
     } else {
-      Serial.println(F("Reading first message if any"));
       hasBeenSetToTextMode = false;
       gsmSerial.println("AT+CMGR=1");
     }
@@ -465,6 +524,10 @@ void getMessage() {
   }
 }
 void parseMessage() {
+  if (isSendingNotification) {
+    return;
+  }
+  
   if (isReadingMessage) {
      return;
   }
@@ -476,7 +539,7 @@ void parseMessage() {
   if (strstr(inboxMessage, ownerNumber) != NULL) {
     if (strstr(inboxMessage, "GET") != NULL) {
       isSendingNotification = true;
-      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Rain: N \n Current plant: %i", humidity, temperature, currentPlant);
+      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Rain: N \n Current plant: %i", humidity, temperature, currentPlantSelected);
     }
   }
 
@@ -545,7 +608,7 @@ void displayCurrentPlant() {
   screen.setCursor(13, 1);
   screen.write(3);
   screen.setCursor(15, 1);
-  screen.print(currentPlant);
+  screen.print(currentPlantSelected);
 }
 void displayRainThreshold() {
   screen.setCursor(9, 1);
@@ -554,9 +617,16 @@ void displayRainThreshold() {
   screen.print("N");
 }
 
-void tipCounter() {
+void resetRainGaugeData() {
+  if (timeElapsed - lastTippedTime >= resetTimeout && tipCount > 0) {
+    tipCount = 0;
+    hasBeenNotifiedRain = false;
+  }
+}
+void tipCounter() {  
   unsigned long currentMillis = millis();
   if (currentMillis - lastTippedTime >= debounceTime) {
+    hasTipped = true;
     tipCount = tipCount + 1;
   }
 
@@ -620,11 +690,13 @@ void readTogglePlantButtonState() {
   }
 
   if (timeElapsed - lastButtonPress >= pressDuration && buttonState == HIGH)  {
-    ledState = !ledState;
-
     toggleCurrentPlant();
-    toggleLogFile();
-    digitalWrite(ledPin, ledState);
+//    toggleLogFile();
+
+    // reset
+    tipCount = 0;
+    hasBeenNotifiedTemparature = false;
+    hasBeenNotifiedRain = false;
 
     lastButtonPress = 0;
     hasBeenPressed = false;
@@ -632,29 +704,65 @@ void readTogglePlantButtonState() {
   }
 
 }
-void toggleCurrentPlant() {
-  currentPlant = currentPlant == 1 ? 2 : 1;
+void setCurrentPlantData() {
+  if (currentPlantSelected == 1) {
+      strcpy(currentPlant.name, plant1.name);
+      strcpy(currentPlant.nameInPlural, plant1.nameInPlural);
+      strcpy(currentPlant.filename, plant1.filename);
+      currentPlant.temperatureThresholdLower = plant1.temperatureThresholdLower;
+      currentPlant.temperatureThresholdUpper = plant1.temperatureThresholdUpper;
+      currentPlant.rainThreshold = plant1.rainThreshold;
+      currentPlant.maxTipCount = plant1.maxTipCount;
+  } else {
+      strcpy(currentPlant.name, plant2.name);
+      strcpy(currentPlant.nameInPlural, plant2.nameInPlural);
+      strcpy(currentPlant.filename, plant2.filename);
+      currentPlant.temperatureThresholdLower = plant2.temperatureThresholdLower;
+      currentPlant.temperatureThresholdUpper = plant2.temperatureThresholdUpper;
+      currentPlant.rainThreshold = plant2.rainThreshold;
+      currentPlant.maxTipCount = plant2.maxTipCount;
+  }
 }
-void toggleLogFile() {
-  currentFilename = currentPlant == 1 ? plant1Filename : plant2Filename;
+void toggleCurrentPlant() {
+  currentPlantSelected = currentPlantSelected == 1 ? 2 : 1;
+  setCurrentPlantData();
 }
 void prepareTextFiles() {
-  if (!SD.exists(plant1Filename)) {
-    setFileHeadings(plant1Filename);
+  if (!SD.exists(plant1.filename)) {
+    setFileHeadingsForPlant(plant1.filename);
   }
 
-  if (!SD.exists(plant2Filename)) {
-    setFileHeadings(plant2Filename);
+  if (!SD.exists(plant2.filename)) {
+    setFileHeadingsForPlant(plant2.filename);
+  }
+
+  if (!SD.exists(rainFilename)) {
+    setFileHeadingsForRain(rainFilename);
   }
 }
-void setFileHeadings(char *filename) {
+void setFileHeadingsForPlant(char *filename) {
   file = SD.open(filename, FILE_WRITE);
   if (file) {
     file.print("Temperature \t");
     file.print("Humidity \t");
-    file.print("Rain (mm/hr) \t");
     file.print("Time \t");
     file.println("Date \t");
+    file.close();
+  }
+}
+void setFileHeadingsForRain(char *filename) {
+  file = SD.open(filename, FILE_WRITE);
+  if (file) { 
+    char oneTipInString[16];
+    char oneTipLabel[16];
+
+    dtostrf(oneTip, 5, 3, oneTipInString);
+    sprintf(oneTipLabel, "Rain (%s inches/tip) \t", oneTipInString);
+
+    file.print("Time \t");
+    file.print("Date \t");
+    file.println(oneTipLabel);
+    
     file.close();
   }
 }
