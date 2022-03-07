@@ -54,7 +54,7 @@ volatile unsigned int tipCount = 0;
 bool hasTipped = false;
 bool skipCountAfterInit = true;
 const float oneTip = 0.013;  // 0.012884753042233359696 inch
-const unsigned int resetTimeout = 30000; // 30 seconds just for simulation
+const unsigned int resetTimeout = 180000; // 3 minutes just for simulation
 const unsigned int debounceTime = 100;
 unsigned long lastTippedTime = 0;
 
@@ -86,9 +86,9 @@ unsigned long startedAt = 0;
 unsigned long startedGettingMessageAt = 0;
 const unsigned int smsTimeout = 1000;
 const unsigned int commandTimeout = 1000;
-char ownerNumber[16] = "+639547624887";
+char ownerNumber[16] = "+639682610713";
 char inboxMessage[128];
-char message[64];
+char message[128];
 char messageOrigin[16];
 char prevCommand[8];
 char currentCommand[8];
@@ -254,8 +254,7 @@ void initPlantData() {
   // 0.2857142857142857/day or 2 inches/week
   plant1.rainThreshold = 0.286;
   // 22 tips max per day
-  // plant1.maxTipCount = 22;
-  plant1.maxTipCount = 3;
+  plant1.maxTipCount = 22;
 
   strcpy(plant2.name, "eggplant");
   strcpy(plant2.nameInPlural, "eggplants");
@@ -266,8 +265,7 @@ void initPlantData() {
   // 0.1428571428571429/day or 1 inch/week
   plant2.rainThreshold = 0.143;
   // 11 tips max per day
-  // plant2.maxTipCount = 11;
-  plant2.maxTipCount = 4;
+  plant2.maxTipCount = 11;
 
   setCurrentPlantData();
 }
@@ -539,7 +537,14 @@ void parseMessage() {
   if (strstr(inboxMessage, ownerNumber) != NULL) {
     if (strstr(inboxMessage, "GET") != NULL) {
       isSendingNotification = true;
-      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Rain: N \n Current plant: %i", humidity, temperature, currentPlantSelected);
+
+      char rainStatus[32];
+      if (tipCount > 0) {
+        strcpy(rainStatus, "Didn't rain today.");
+      } else {
+        strcpy(rainStatus, "It rained today.");
+      }
+      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Current plant: %s \n\n %s", humidity, temperature, currentPlant.name, rainStatus);
     }
   }
 
@@ -552,7 +557,6 @@ void displayData() {
     lastScreenRefresh = timeElapsed;
     displayTemperature();
     displayHumidity();
-    displayRainThreshold();
     displayCurrentPlant();
   }
 }
@@ -605,18 +609,11 @@ void displayTime() {
   }
 }
 void displayCurrentPlant() {
-  screen.setCursor(13, 1);
+  screen.setCursor(9, 1);
   screen.write(3);
-  screen.setCursor(15, 1);
+  screen.setCursor(11, 1);
   screen.print(currentPlantSelected);
 }
-void displayRainThreshold() {
-  screen.setCursor(9, 1);
-  screen.write(4);
-  screen.setCursor(11, 1);
-  screen.print("N");
-}
-
 void resetRainGaugeData() {
   if (timeElapsed - lastTippedTime >= resetTimeout && tipCount > 0) {
     tipCount = 0;
@@ -648,8 +645,12 @@ bool sendSms() {
     startedAt = timeElapsed;
     if (!strcmp(prevCommand, "txtMode")) {
       strcpy(currentCommand, "contact");
-      Serial.println(F("Setting contact"));
-      gsmSerial.println("AT+CMGS=\"+639682610713\"");
+      char contactCmd[32];
+      sprintf(contactCmd, "AT+CMGS=\"%s\"", ownerNumber);
+      gsmSerial.println(contactCmd); 
+      
+      Serial.print(F("Setting contact: "));
+      Serial.println(contactCmd);
     }
     if (!strcmp(currentCommand, "contact") && strcmp(prevCommand, "txtMode")) {
       Serial.print(F("Setting message: "));
@@ -691,7 +692,6 @@ void readTogglePlantButtonState() {
 
   if (timeElapsed - lastButtonPress >= pressDuration && buttonState == HIGH)  {
     toggleCurrentPlant();
-//    toggleLogFile();
 
     // reset
     tipCount = 0;
