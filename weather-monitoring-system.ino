@@ -88,8 +88,8 @@ const unsigned int smsTimeout = 1000;
 const unsigned int commandTimeout = 1000;
 char ownerNumber[16] = "+639682610713";
 char inboxMessage[128];
-char message[128];
-char messageOrigin[16];
+char message[256];
+char messageOrigin[32];
 char prevCommand[8];
 char currentCommand[8];
 
