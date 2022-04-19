@@ -579,9 +579,9 @@ void parseMessage() {
 
       char rainStatus[32];
       if (tipCount > 0) {
-        strcpy(rainStatus, "Didn't rain today.");
-      } else {
         strcpy(rainStatus, "It rained today.");
+      } else {
+        strcpy(rainStatus, "Didn't rain today.");
       }
       sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Current plant: %s \n\n %s", humidity, temperature, currentPlant.name, rainStatus);
     }
