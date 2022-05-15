@@ -53,6 +53,7 @@ bool hasBeenPressed = false;
 volatile unsigned int tipCount = 0;
 bool hasTipped = false;
 bool skipCountAfterInit = true;
+bool hasAlreadyResetRainGaugeData = false;
 const float oneTip = 0.013;  // 0.012884753042233359696 inch
 const unsigned int resetTimeout = 180000; // 3 minutes just for simulation
 const unsigned int debounceTime = 100;
@@ -60,6 +61,7 @@ unsigned long lastTippedTime = 0;
 
 // plant
 byte currentPlantSelected = 1;
+const byte plantCount = 3;
 struct Plant {
   char name[16];
   char nameInPlural[16];
@@ -70,7 +72,7 @@ struct Plant {
   int humidityThresholdLower;
   float rainThreshold;
   byte maxTipCount;
-} plant1, plant2, currentPlant;
+} plant1, plant2, plant3, currentPlant;
 
 
 // sms
@@ -252,6 +254,8 @@ void initSd() {
   delay(initScreenTimeout);
 }
 void initPlantData() {
+  // Note: When adding a new plant, make sure to update the plantCount variable
+  
   strcpy(plant1.name, "tomato");
   strcpy(plant1.nameInPlural, "tomatoes");
   strcpy(plant1.filename, "plant1.txt");
@@ -267,7 +271,6 @@ void initPlantData() {
   strcpy(plant2.name, "eggplant");
   strcpy(plant2.nameInPlural, "eggplants");
   strcpy(plant2.filename, "plant2.txt");
-  // 21 to 32 degree celsius
   plant2.temperatureThresholdLower = 21;
   plant2.temperatureThresholdUpper = 32;
   plant2.humidityThresholdLower = 50;
@@ -276,6 +279,18 @@ void initPlantData() {
   plant2.rainThreshold = 0.143;
   // 11 tips max per day
   plant2.maxTipCount = 11;
+
+  strcpy(plant3.name, "lettuce");
+  strcpy(plant3.nameInPlural, "lettuces");
+  strcpy(plant3.filename, "plant3.txt");
+  plant3.temperatureThresholdLower = 21;
+  plant3.temperatureThresholdUpper = 24;
+  plant3.humidityThresholdLower = 50;
+  plant3.humidityThresholdUpper = 70;
+  // 0.1428571428571429/day or 1 inch/week
+  plant3.rainThreshold = 0.143;
+  // 11 tips max per day
+  plant3.maxTipCount = 11;
 
   setCurrentPlantData();
 }
@@ -401,7 +416,9 @@ void getRainGaugeData() {
   if (tipCount >= currentPlant.maxTipCount && !hasBeenNotifiedRain && !isSendingNotification) {
     isSendingNotification = true;
     strcpy(messageOrigin, "rain");
-    sprintf(message, "It's raining too much. Move your %s to a dry place!", currentPlant.nameInPlural);
+    char rainInMmStr[8];
+    dtostrf(getRainInMm(), 3, 1, rainInMmStr);
+    sprintf(message, "It's raining too much. Move your %s to a dry place! \n Rain: %s mm", currentPlant.nameInPlural, rainInMmStr);
   }
 }
 void logRainData() {
@@ -464,7 +481,7 @@ void checkTemperature() {
     isSendingNotification = true;
     temperatureSampleCountBeforeReset = 0;
     strcpy(messageOrigin, "temperature");
-    sprintf(message, "Current temperature is not good for your %s !", currentPlant.nameInPlural);
+    sprintf(message, "The current temperature is %i degree celsius which is not good for your %s !", temperature, currentPlant.nameInPlural);
     return;
   }
 
@@ -473,7 +490,7 @@ void checkTemperature() {
 void checkHumidity() {
   int upperLimit = currentPlant.humidityThresholdUpper;
   int lowerLimit = currentPlant.humidityThresholdLower;
-
+  
   if (humidity <= upperLimit && humidity >= lowerLimit && humiditySampleCount > 0) {
     if (humiditySampleCountBeforeReset >= maxSampleCount) {
       humiditySampleCount = 0;
@@ -488,7 +505,7 @@ void checkHumidity() {
     isSendingNotification = true;
     humiditySampleCountBeforeReset = 0;
     strcpy(messageOrigin, "humidity");
-    sprintf(message, "The current humidity for your %s is not ideal, please spray some fungicide and check if you need to do some pruning.", currentPlant.nameInPlural);
+    sprintf(message, "The current humidity is %i%% which is not ideal for your %s, please spray some fungicide and check if you need to do some pruning.", humidity, currentPlant.nameInPlural);
     return;
   }
 
@@ -577,13 +594,13 @@ void parseMessage() {
     if (strstr(inboxMessage, "GET") != NULL) {
       isSendingNotification = true;
 
-      char rainStatus[32];
+      char rainInMmStr[8];
       if (tipCount > 0) {
-        strcpy(rainStatus, "It rained today.");
+        dtostrf(getRainInMm(), 3, 1, rainInMmStr);
       } else {
-        strcpy(rainStatus, "Didn't rain today.");
+        strcpy(rainInMmStr, "0");
       }
-      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Current plant: %s \n\n %s", humidity, temperature, currentPlant.name, rainStatus);
+      sprintf(message, " Humidity: %i%% \n Temperature: %i C \n Current plant: %s \n Rain: %s mm", humidity, temperature, currentPlant.name, rainInMmStr);
     }
   }
 
@@ -653,10 +670,19 @@ void displayCurrentPlant() {
   screen.setCursor(11, 1);
   screen.print(currentPlantSelected);
 }
+
+float getRainInMm() {
+  return tipCount * oneTip * 25.4;
+}
 void resetRainGaugeData() {
   if (timeElapsed - lastTippedTime >= resetTimeout && tipCount > 0) {
-    tipCount = 0;
-    hasBeenNotifiedRain = false;
+    RtcDateTime current = rtc.GetDateTime();
+    if (current.Hour() == 0 && !hasAlreadyResetRainGaugeData) {
+      tipCount = 0;
+      hasBeenNotifiedRain = false;
+    } else {
+      hasAlreadyResetRainGaugeData = false;
+    }
   }
 }
 void tipCounter() {
@@ -730,7 +756,7 @@ void readTogglePlantButtonState() {
   }
 
   if (timeElapsed - lastButtonPress >= pressDuration && buttonState == HIGH)  {
-    toggleCurrentPlant();
+    changeCurrentPlant();
 
     // reset
     tipCount = 0;
@@ -750,20 +776,39 @@ void setCurrentPlantData() {
     strcpy(currentPlant.filename, plant1.filename);
     currentPlant.temperatureThresholdLower = plant1.temperatureThresholdLower;
     currentPlant.temperatureThresholdUpper = plant1.temperatureThresholdUpper;
+    currentPlant.humidityThresholdLower = plant1.humidityThresholdLower;
+    currentPlant.humidityThresholdUpper = plant1.humidityThresholdUpper;
     currentPlant.rainThreshold = plant1.rainThreshold;
     currentPlant.maxTipCount = plant1.maxTipCount;
-  } else {
+  } else if (currentPlantSelected == 2) {
     strcpy(currentPlant.name, plant2.name);
     strcpy(currentPlant.nameInPlural, plant2.nameInPlural);
     strcpy(currentPlant.filename, plant2.filename);
     currentPlant.temperatureThresholdLower = plant2.temperatureThresholdLower;
     currentPlant.temperatureThresholdUpper = plant2.temperatureThresholdUpper;
+    currentPlant.humidityThresholdLower = plant2.humidityThresholdLower;
+    currentPlant.humidityThresholdUpper = plant2.humidityThresholdUpper;
     currentPlant.rainThreshold = plant2.rainThreshold;
     currentPlant.maxTipCount = plant2.maxTipCount;
+  } else if (currentPlantSelected == 3) {
+    strcpy(currentPlant.name, plant3.name);
+    strcpy(currentPlant.nameInPlural, plant3.nameInPlural);
+    strcpy(currentPlant.filename, plant3.filename);
+    currentPlant.temperatureThresholdLower = plant3.temperatureThresholdLower;
+    currentPlant.temperatureThresholdUpper = plant3.temperatureThresholdUpper;
+    currentPlant.humidityThresholdLower = plant3.humidityThresholdLower;
+    currentPlant.humidityThresholdUpper = plant3.humidityThresholdUpper;
+    currentPlant.rainThreshold = plant3.rainThreshold;
+    currentPlant.maxTipCount = plant3.maxTipCount;
   }
 }
-void toggleCurrentPlant() {
-  currentPlantSelected = currentPlantSelected == 1 ? 2 : 1;
+void changeCurrentPlant() {
+  currentPlantSelected++;
+  
+  if (currentPlantSelected > plantCount) {
+    currentPlantSelected = 1;
+  }
+  
   setCurrentPlantData();
 }
 void prepareTextFiles() {
